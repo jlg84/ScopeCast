@@ -118,7 +118,7 @@ def fetch_open_meteo(lat, lon, tz):
         "latitude": lat,
         "longitude": lon,
         "hourly": "cloudcover,precipitation_probability,temperature_2m,"
-                   "relative_humidity_2m,windspeed_10m,dewpoint_2m",
+                   "relative_humidity_2m,windspeed_10m,windgusts_10m,dewpoint_2m",
         "daily": "sunrise,sunset",
         "timezone": tz,
         "forecast_days": 2,
@@ -249,7 +249,7 @@ def collect_open_meteo_series(data, tz, start, end):
     models = data.get("_models_requested", ["best_match"])
     per_model_cloud = {m: [] for m in models}
     precip_probs = []
-    temps, dewpoints, winds, humidities = [], [], [], []
+    temps, dewpoints, winds, gusts, humidities = [], [], [], [], []
     for i, t in enumerate(times):
         dt = parse_iso_local(t, tz)
         if not (start <= dt <= end):
@@ -268,6 +268,8 @@ def collect_open_meteo_series(data, tz, start, end):
             dewpoints.append(hourly["dewpoint_2m"][i])
         if "windspeed_10m" in hourly and hourly["windspeed_10m"][i] is not None:
             winds.append(hourly["windspeed_10m"][i])
+        if "windgusts_10m" in hourly and hourly["windgusts_10m"][i] is not None:
+            gusts.append(hourly["windgusts_10m"][i])
         if "relative_humidity_2m" in hourly and hourly["relative_humidity_2m"][i] is not None:
             humidities.append(hourly["relative_humidity_2m"][i])
 
@@ -278,12 +280,14 @@ def collect_open_meteo_series(data, tz, start, end):
         "avg_temp": round(statistics.mean(temps), 1) if temps else None,
         "avg_dewpoint": round(statistics.mean(dewpoints), 1) if dewpoints else None,
         "avg_wind": round(statistics.mean(winds), 1) if winds else None,
+        "max_gust": round(max(gusts), 1) if gusts else None,
         "avg_humidity": round(statistics.mean(humidities), 1) if humidities else None,
     }
 
 
 def collect_yr_series(data, tz, start, end):
     cloud_vals = []
+    wind_vals_ms = []
     rain_mm = 0.0
     for entry in data["properties"]["timeseries"]:
         dt = datetime.fromisoformat(entry["time"].replace("Z", "+00:00")).astimezone(tz)
@@ -292,11 +296,14 @@ def collect_yr_series(data, tz, start, end):
         details = entry["data"].get("instant", {}).get("details", {})
         if "cloud_area_fraction" in details:
             cloud_vals.append(details["cloud_area_fraction"])
+        if "wind_speed" in details:
+            wind_vals_ms.append(details["wind_speed"])
         next1 = entry["data"].get("next_1_hours", {}).get("details", {})
         if "precipitation_amount" in next1:
             rain_mm += next1["precipitation_amount"]
     return {
         "cloud_mean": round(statistics.mean(cloud_vals), 1) if cloud_vals else None,
+        "wind_mean_kmh": round(statistics.mean(wind_vals_ms) * 3.6, 1) if wind_vals_ms else None,
         "total_rain_mm": round(rain_mm, 2),
     }
 
@@ -481,6 +488,31 @@ def build_report(config):
         rain_risk = True
         rain_notes.append(f"MetService forecasts up to {ms_summary['max_precip_rate_mm_hr']}mm/hr overnight")
 
+    # Wind - often as much a threat to a night's imaging as cloud, since it
+    # shakes the rig and disrupts autoguiding. Combine every source that
+    # reports it into a simple mean, and separately track peak gusts.
+    wind_avgs = []
+    if om_summary.get("avg_wind") is not None:
+        wind_avgs.append(om_summary["avg_wind"])
+    if yr_summary and yr_summary.get("wind_mean_kmh") is not None:
+        wind_avgs.append(yr_summary["wind_mean_kmh"])
+    ensemble_wind_mean = round(statistics.mean(wind_avgs), 1) if wind_avgs else None
+    max_gust = om_summary.get("max_gust")
+
+    wind_warn_kmh = config.get("wind_warn_kmh", 20)
+    wind_bad_kmh = config.get("wind_bad_kmh", 35)
+
+    wind_risk = False
+    wind_notes = []
+    if ensemble_wind_mean is not None and ensemble_wind_mean >= wind_bad_kmh:
+        wind_risk = True
+        wind_notes.append(f"Average wind {ensemble_wind_mean} km/h - likely too windy for steady tracking/guiding")
+    elif ensemble_wind_mean is not None and ensemble_wind_mean >= wind_warn_kmh:
+        wind_notes.append(f"Average wind {ensemble_wind_mean} km/h - may affect guiding on exposed setups")
+    if max_gust is not None and max_gust >= wind_bad_kmh * 1.3:
+        wind_risk = True
+        wind_notes.append(f"Gusts up to {max_gust} km/h")
+
     if ensemble_mean is None:
         verdict = "Unable to determine — not enough data from any source."
     elif ensemble_mean < 20:
@@ -491,6 +523,9 @@ def build_report(config):
         verdict = "Marginal — patchy cloud likely, keep an eye on it."
     else:
         verdict = "Poor — mostly cloudy, imaging unlikely to be worthwhile."
+
+    if wind_risk:
+        verdict += " Wind is also a concern tonight — expect a shaky rig."
 
     moon_illum, moon_name = moon_phase_info(datetime.now(timezone.utc))
 
@@ -510,6 +545,12 @@ def build_report(config):
         "ensemble_cloud_spread": ensemble_spread,
         "rain_risk": rain_risk,
         "rain_notes": rain_notes,
+        "ensemble_wind_mean": ensemble_wind_mean,
+        "max_gust": max_gust,
+        "wind_risk": wind_risk,
+        "wind_notes": wind_notes,
+        "wind_warn_kmh": wind_warn_kmh,
+        "wind_bad_kmh": wind_bad_kmh,
         "verdict": verdict,
         "moon_illumination": round(moon_illum, 1),
         "moon_phase": moon_name,
@@ -531,6 +572,13 @@ def render_text(report, config):
         lines.append("RAIN RISK: " + "; ".join(report["rain_notes"]))
     else:
         lines.append("Rain risk: low")
+    if report.get("wind_risk"):
+        lines.append("WIND RISK: " + "; ".join(report.get("wind_notes", [])))
+    elif report.get("wind_notes"):
+        lines.append("Wind: " + "; ".join(report["wind_notes"]))
+    else:
+        gust_bit = f", gusts to {report['max_gust']} km/h" if report.get("max_gust") is not None else ""
+        lines.append(f"Wind: {report.get('ensemble_wind_mean', '?')} km/h avg{gust_bit}")
     lines.append(f"Moon: {report['moon_phase']} ({report['moon_illumination']}% illuminated)")
     if report["seven_timer"]:
         st = report["seven_timer"]
@@ -538,7 +586,7 @@ def render_text(report, config):
     om = report["open_meteo"]
     if om.get("avg_temp") is not None:
         lines.append(f"Avg temp: {om['avg_temp']}°C, dew point: {om['avg_dewpoint']}°C, "
-                      f"humidity: {om['avg_humidity']}%, wind: {om['avg_wind']} km/h")
+                      f"humidity: {om['avg_humidity']}%")
     lines.append("")
     lines.append("Per-model cloud cover (Open-Meteo):")
     for m, v in om["model_cloud_means"].items():
@@ -599,6 +647,16 @@ def _cloud_color(pct):
     return "#c62828"
 
 
+def _wind_color(kmh, warn, bad):
+    if kmh is None:
+        return "#5c6690"
+    if kmh < warn:
+        return "#2e7d32"
+    if kmh < bad:
+        return "#e07b00"
+    return "#c62828"
+
+
 def _verdict_style(ensemble_mean):
     color = _cloud_color(ensemble_mean if ensemble_mean is not None else 100)
     if ensemble_mean is None:
@@ -633,13 +691,13 @@ def _bar_row(label, pct):
     )
 
 
-def _stat_card(label, value, sub=""):
+def _stat_card(label, value, sub="", value_color="#ffffff"):
     sub_html = ('<div style="color:#6c7aa8;font-size:11px;margin-top:2px;">' + _esc(sub) + '</div>') if sub else ""
     return (
         '<td width="50%" style="padding:6px;" valign="top">'
         '<div style="background:#1a2140;border-radius:8px;padding:12px 14px;font-family:-apple-system,Helvetica,Arial,sans-serif;">'
         '<div style="color:#9aa4c7;font-size:11px;letter-spacing:.04em;">' + _esc(label) + '</div>'
-        '<div style="color:#ffffff;font-size:20px;font-weight:700;margin-top:2px;">' + str(value) + '</div>'
+        '<div style="color:' + value_color + ';font-size:20px;font-weight:700;margin-top:2px;">' + str(value) + '</div>'
         + sub_html +
         '</div>'
         '</td>'
@@ -668,25 +726,32 @@ def render_html(report, config):
     else:
         rain_color, rain_text = "#2e7d32", "Low"
 
+    wind_warn_kmh = report.get("wind_warn_kmh", 20)
+    wind_bad_kmh = report.get("wind_bad_kmh", 35)
+    ensemble_wind_mean = report.get("ensemble_wind_mean")
+    wind_color = _wind_color(ensemble_wind_mean, wind_warn_kmh, wind_bad_kmh)
+    wind_value = "{} km/h".format(ensemble_wind_mean) if ensemble_wind_mean is not None else "n/a"
+    wind_sub_bits = []
+    if report.get("max_gust") is not None:
+        wind_sub_bits.append("gusts to {} km/h".format(report["max_gust"]))
+    if report.get("wind_notes"):
+        wind_sub_bits.append("; ".join(report["wind_notes"]))
+    wind_sub = " · ".join(wind_sub_bits) if wind_sub_bits else "avg over the dark window"
+
     seven = report.get("seven_timer") or {}
     seeing = seven.get("seeing", "n/a")
     transparency = seven.get("transparency", "n/a")
 
     spread_sub = ("models disagree by {} pts".format(report.get('ensemble_cloud_spread', 0))
                   if report.get("ensemble_cloud_spread") else "")
-    stat_cards = (
-        _stat_card("CLOUD COVER (ensemble)",
-                   "{}%".format(ensemble_mean) if ensemble_mean is not None else "n/a",
-                   spread_sub)
-        + _stat_card("MOON", "{} {}%".format(moon_emoji, report.get('moon_illumination', '?')), moon_phase)
-        + _stat_card("SEEING / TRANSPARENCY", "{} / {}".format(seeing, transparency), "7Timer! astro forecast")
-    )
+    cloud_card = _stat_card("CLOUD COVER (ensemble)",
+                             "{}%".format(ensemble_mean) if ensemble_mean is not None else "n/a",
+                             spread_sub)
+    wind_card = _stat_card("WIND", wind_value, wind_sub, value_color=wind_color)
+    moon_card = _stat_card("MOON", "{} {}%".format(moon_emoji, report.get('moon_illumination', '?')), moon_phase)
+    seeing_card = _stat_card("SEEING / TRANSPARENCY", "{} / {}".format(seeing, transparency), "7Timer! astro forecast")
     rain_sub = "; ".join(report.get("rain_notes", [])) or "no precipitation flagged"
-    rain_card = _stat_card("RAIN RISK", rain_text, rain_sub)
-    rain_card = rain_card.replace(
-        'color:#ffffff;font-size:20px;font-weight:700;',
-        'color:' + rain_color + ';font-size:18px;font-weight:700;'
-    )
+    rain_card = _stat_card("RAIN RISK", rain_text, rain_sub, value_color=rain_color)
 
     bars = "".join(
         _bar_row(MODEL_DISPLAY_NAMES.get(m, m), pct)
@@ -707,8 +772,6 @@ def render_html(report, config):
         conditions_bits.append("Dew point {}°C".format(om['avg_dewpoint']))
     if om.get("avg_humidity") is not None:
         conditions_bits.append("Humidity {}%".format(om['avg_humidity']))
-    if om.get("avg_wind") is not None:
-        conditions_bits.append("Wind {} km/h".format(om['avg_wind']))
     conditions_line = " &middot; ".join(conditions_bits)
 
     source_status_line = " &middot; ".join(
@@ -737,9 +800,10 @@ def render_html(report, config):
     parts.append('</td></tr>')
     parts.append('<tr><td style="padding:16px 18px 4px 18px;">')
     parts.append('<table role="presentation" width="100%" cellpadding="0" cellspacing="0">')
-    parts.append('<tr>' + stat_cards + '</tr>')
+    parts.append('<tr>' + cloud_card + wind_card + '</tr>')
     dark_card = _stat_card("HOURS OF DARKNESS", (str(report.get("dark_hours", "?")) + "h"), "astronomical twilight to twilight")
     parts.append('<tr>' + rain_card + dark_card + '</tr>')
+    parts.append('<tr>' + moon_card + seeing_card + '</tr>')
     parts.append('</table>')
     parts.append('</td></tr>')
     parts.append('<tr><td style="padding:12px 24px 4px 24px;">')

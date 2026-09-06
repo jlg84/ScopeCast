@@ -5,5 +5,9 @@
   "timezone": "Pacific/Auckland",
   "sender": "you@gmail.com",
   "recipient": "you@gmail.com",
-  "contact_email": "you@gmail.com"
+  "contact_email": "you@gmail.com",
+
+  "_comment_wind": "Optional. Average wind speed (km/h) thresholds for the WIND card and risk flag. Defaults are 20/35 if omitted.",
+  "wind_warn_kmh": 20,
+  "wind_bad_kmh": 35
 }

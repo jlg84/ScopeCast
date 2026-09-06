@@ -15,6 +15,10 @@ that whole class of problem.
 - Fetches cloud cover, precipitation, wind, humidity and temperature from
   multiple independent sources and combines them into an ensemble forecast,
   including how much the sources disagree (a rough confidence signal).
+- Treats wind as a first-class signal, not an afterthought: reports the
+  ensemble average wind speed and peak gusts, color-codes them, and flags
+  when it's likely to shake your rig or disrupt guiding (thresholds are
+  configurable).
 - Computes real astronomical twilight (not just sunset/sunrise) so the
   averaging window matches when it's actually dark, and reports total
   hours of darkness.
@@ -92,6 +96,10 @@ files and fill them in).
   On Linux, edit with `crontab -e`.
 - **Verdict thresholds / colors**: see `_cloud_color()` and the verdict
   logic in `build_report()` in `weather_report.py`.
+- **Wind risk thresholds**: set `wind_warn_kmh` / `wind_bad_kmh` in
+  `config.json` (defaults 20 / 35 km/h average wind) to match how exposed
+  your setup is — a heavy pier-mounted rig can tolerate more wind than a
+  lightweight tripod.
 - **Adding another data source**: follow the pattern of the existing
   `fetch_*` / `collect_*` function pairs, then wire the result into
   `build_report()`'s ensemble and rain-risk logic, and into `render_text()`
