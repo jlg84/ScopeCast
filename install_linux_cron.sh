@@ -75,7 +75,7 @@ HOUR1="${HOUR1:-9}"
 read -p "Hour to send the afternoon/evening report (0-23) [default 16]: " HOUR2
 HOUR2="${HOUR2:-16}"
 
-CRON_MARKER="# astro-weather-report ($PROJECT_DIR)"
+CRON_MARKER="# scopecast ($PROJECT_DIR)"
 CRON_LINE1="0 $HOUR1 * * * cd \"$PROJECT_DIR\" && \"$PYTHON_BIN\" weather_report.py >> \"$PROJECT_DIR/cron.log\" 2>&1 $CRON_MARKER"
 CRON_LINE2="0 $HOUR2 * * * cd \"$PROJECT_DIR\" && \"$PYTHON_BIN\" weather_report.py >> \"$PROJECT_DIR/cron.log\" 2>&1 $CRON_MARKER"
 
@@ -84,7 +84,7 @@ CRON_LINE2="0 $HOUR2 * * * cd \"$PROJECT_DIR\" && \"$PYTHON_BIN\" weather_report
 echo ""
 echo "Installed two cron entries (at ${HOUR1}:00 and ${HOUR2}:00 daily, system time zone)."
 echo "View them with: crontab -l"
-echo "Remove them later with: crontab -l | grep -v \"astro-weather-report ($PROJECT_DIR)\" | crontab -"
+echo "Remove them later with: crontab -l | grep -v \"scopecast ($PROJECT_DIR)\" | crontab -"
 echo ""
 echo "Test it right now with:"
 echo "  cd \"$PROJECT_DIR\" && \"$PYTHON_BIN\" weather_report.py --dry-run"

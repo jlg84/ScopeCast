@@ -1,4 +1,4 @@
-# Astro Weather Report
+# ScopeCast
 
 A small, self-contained script for astrophotographers: it polls several
 independent weather sources for your location, builds a consensus forecast
@@ -84,10 +84,10 @@ files and fill them in).
 - **Location**: edit `latitude`/`longitude`/`location_name`/`timezone` in
   `config.json`.
 - **Schedule**: on macOS, edit the `StartCalendarInterval` entries in
-  `~/Library/LaunchAgents/local.astro-weather-report.plist`, then:
+  `~/Library/LaunchAgents/local.scopecast.plist`, then:
   ```
-  launchctl unload ~/Library/LaunchAgents/local.astro-weather-report.plist
-  launchctl load -w ~/Library/LaunchAgents/local.astro-weather-report.plist
+  launchctl unload ~/Library/LaunchAgents/local.scopecast.plist
+  launchctl load -w ~/Library/LaunchAgents/local.scopecast.plist
   ```
   On Linux, edit with `crontab -e`.
 - **Verdict thresholds / colors**: see `_cloud_color()` and the verdict
@@ -110,13 +110,13 @@ files and fill them in).
 
 macOS:
 ```
-launchctl unload ~/Library/LaunchAgents/local.astro-weather-report.plist
-rm ~/Library/LaunchAgents/local.astro-weather-report.plist
+launchctl unload ~/Library/LaunchAgents/local.scopecast.plist
+rm ~/Library/LaunchAgents/local.scopecast.plist
 ```
 
 Linux:
 ```
-crontab -l | grep -v "astro-weather-report" | crontab -
+crontab -l | grep -v "scopecast" | crontab -
 ```
 
 ## Notes on reliability

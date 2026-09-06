@@ -99,7 +99,7 @@ HOUR1="${HOUR1:-9}"
 read -p "Hour to send the afternoon/evening report (0-23) [default 16]: " HOUR2
 HOUR2="${HOUR2:-16}"
 
-PLIST_LABEL="local.astro-weather-report"
+PLIST_LABEL="local.scopecast"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
 cat > "$PLIST_PATH" << PLISTEOF
