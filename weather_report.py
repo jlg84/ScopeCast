@@ -209,6 +209,25 @@ def _find_daily_key(daily, prefix):
     return candidates[0]
 
 
+def _hourly_series(hourly, base_key, preferred_model="best_match"):
+    """Same suffixing issue as _find_daily_key, but for hourly variables:
+    when multiple models are requested, Open-Meteo suffixes EVERY hourly
+    variable with the model name (e.g. 'windspeed_10m_best_match'), not
+    just cloud cover. For single-value (non-ensemble) variables like temp,
+    humidity, wind and gusts, we just want one representative series, so
+    prefer the plain key, then the preferred model's suffixed key, then
+    whatever suffixed variant is available."""
+    if base_key in hourly:
+        return hourly[base_key]
+    preferred_key = f"{base_key}_{preferred_model}"
+    if preferred_key in hourly:
+        return hourly[preferred_key]
+    candidates = [k for k in hourly.keys() if k.startswith(base_key + "_")]
+    if candidates:
+        return hourly[candidates[0]]
+    return None
+
+
 def night_window(open_meteo_data, tz):
     daily = open_meteo_data["daily"]
     sunset_key = _find_daily_key(daily, "sunset")
@@ -248,6 +267,17 @@ def collect_open_meteo_series(data, tz, start, end):
     times = hourly["time"]
     models = data.get("_models_requested", ["best_match"])
     per_model_cloud = {m: [] for m in models}
+
+    # Single-value variables (not part of the cloud-cover ensemble) get
+    # suffixed per model too when multiple models are requested - resolve
+    # each to one representative series up front. See _hourly_series().
+    precip_series = _hourly_series(hourly, "precipitation_probability")
+    temp_series = _hourly_series(hourly, "temperature_2m")
+    dewpoint_series = _hourly_series(hourly, "dewpoint_2m")
+    wind_series = _hourly_series(hourly, "windspeed_10m")
+    gust_series = _hourly_series(hourly, "windgusts_10m")
+    humidity_series = _hourly_series(hourly, "relative_humidity_2m")
+
     precip_probs = []
     temps, dewpoints, winds, gusts, humidities = [], [], [], [], []
     for i, t in enumerate(times):
@@ -260,18 +290,18 @@ def collect_open_meteo_series(data, tz, start, end):
                 key = "cloudcover"
             if key in hourly and hourly[key][i] is not None:
                 per_model_cloud[m].append(hourly[key][i])
-        if "precipitation_probability" in hourly and hourly["precipitation_probability"][i] is not None:
-            precip_probs.append(hourly["precipitation_probability"][i])
-        if "temperature_2m" in hourly and hourly["temperature_2m"][i] is not None:
-            temps.append(hourly["temperature_2m"][i])
-        if "dewpoint_2m" in hourly and hourly["dewpoint_2m"][i] is not None:
-            dewpoints.append(hourly["dewpoint_2m"][i])
-        if "windspeed_10m" in hourly and hourly["windspeed_10m"][i] is not None:
-            winds.append(hourly["windspeed_10m"][i])
-        if "windgusts_10m" in hourly and hourly["windgusts_10m"][i] is not None:
-            gusts.append(hourly["windgusts_10m"][i])
-        if "relative_humidity_2m" in hourly and hourly["relative_humidity_2m"][i] is not None:
-            humidities.append(hourly["relative_humidity_2m"][i])
+        if precip_series and precip_series[i] is not None:
+            precip_probs.append(precip_series[i])
+        if temp_series and temp_series[i] is not None:
+            temps.append(temp_series[i])
+        if dewpoint_series and dewpoint_series[i] is not None:
+            dewpoints.append(dewpoint_series[i])
+        if wind_series and wind_series[i] is not None:
+            winds.append(wind_series[i])
+        if gust_series and gust_series[i] is not None:
+            gusts.append(gust_series[i])
+        if humidity_series and humidity_series[i] is not None:
+            humidities.append(humidity_series[i])
 
     model_means = {m: round(statistics.mean(v), 1) for m, v in per_model_cloud.items() if v}
     return {
