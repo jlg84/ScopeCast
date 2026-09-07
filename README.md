@@ -19,6 +19,11 @@ that whole class of problem.
   ensemble average wind speed and peak gusts, color-codes them, and flags
   when it's likely to shake your rig or disrupt guiding (thresholds are
   configurable).
+- Finds the best clear-sky window for the night instead of just averaging
+  everything into one number: builds an hour-by-hour cloud-cover ensemble
+  across the dark window, reports the longest contiguous clear stretch
+  (e.g. "8:00pm-12:00am"), and calls out when clouds are expected to roll
+  in or clear up partway through the night.
 - Computes real astronomical twilight (not just sunset/sunrise) so the
   averaging window matches when it's actually dark, and reports total
   hours of darkness.
@@ -100,6 +105,11 @@ files and fill them in).
   `config.json` (defaults 20 / 35 km/h average wind) to match how exposed
   your setup is — a heavy pier-mounted rig can tolerate more wind than a
   lightweight tripod.
+- **Best-window clear threshold**: set `clear_threshold_pct` in
+  `config.json` (default 30) — the cloud-cover percentage below which an
+  hour counts as "clear" when finding the night's best window. Lower it
+  for a stricter cutoff (e.g. narrowband imaging), raise it if you're happy
+  shooting through some haze.
 - **Adding another data source**: follow the pattern of the existing
   `fetch_*` / `collect_*` function pairs, then wire the result into
   `build_report()`'s ensemble and rain-risk logic, and into `render_text()`

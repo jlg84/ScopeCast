@@ -9,5 +9,8 @@
 
   "_comment_wind": "Optional. Average wind speed (km/h) thresholds for the WIND card and risk flag. Defaults are 20/35 if omitted.",
   "wind_warn_kmh": 20,
-  "wind_bad_kmh": 35
+  "wind_bad_kmh": 35,
+
+  "_comment_clear_threshold": "Optional. Cloud cover % below which an hour counts as clear when finding the Best Window tonight. Default is 30 if omitted.",
+  "clear_threshold_pct": 30
 }

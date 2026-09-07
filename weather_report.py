@@ -411,6 +411,127 @@ def collect_metservice_series(data, tz, start, end):
 # --------------------------------------------------------------------------
 # Report building
 # --------------------------------------------------------------------------
+def _hour_bucket(dt):
+    """Round a datetime down to the start of its local hour, so values from
+    different sources (which may report a few minutes off from each other)
+    line up on the same hourly slot."""
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
+def collect_hourly_timeline(om_data, yr_data, mb_data, ms_data, tz, start, end):
+    """Build an hour-by-hour ensemble cloud-cover series across the dark
+    window by combining every source that has hourly data, instead of
+    collapsing the whole night into one average. This is what lets us find
+    the best contiguous clear stretch (and flag when clouds are expected to
+    roll in), rather than reporting a single blended verdict that can hide
+    a night that starts clear and clouds over (or vice versa)."""
+    hourly_points = {}
+
+    hourly = om_data.get("hourly", {}) if om_data else {}
+    times = hourly.get("time", [])
+    models = om_data.get("_models_requested", ["best_match"]) if om_data else []
+    for i, t in enumerate(times):
+        dt = parse_iso_local(t, tz)
+        if not (start <= dt <= end):
+            continue
+        vals = []
+        for m in models:
+            key = f"cloudcover_{m}"
+            if key not in hourly and m == "best_match":
+                key = "cloudcover"
+            if key in hourly and hourly[key][i] is not None:
+                vals.append(hourly[key][i])
+        if vals:
+            hourly_points.setdefault(_hour_bucket(dt), []).append(statistics.mean(vals))
+
+    if yr_data:
+        for entry in yr_data.get("properties", {}).get("timeseries", []):
+            dt = datetime.fromisoformat(entry["time"].replace("Z", "+00:00")).astimezone(tz)
+            if not (start <= dt <= end):
+                continue
+            details = entry.get("data", {}).get("instant", {}).get("details", {})
+            if "cloud_area_fraction" in details:
+                hourly_points.setdefault(_hour_bucket(dt), []).append(details["cloud_area_fraction"])
+
+    if mb_data and "data_1h" in mb_data:
+        d = mb_data["data_1h"]
+        for i, t in enumerate(d.get("time", [])):
+            try:
+                dt = datetime.strptime(t, "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+            except ValueError:
+                continue
+            if not (start <= dt <= end):
+                continue
+            if "totalcloudcover" in d and d["totalcloudcover"][i] is not None:
+                hourly_points.setdefault(_hour_bucket(dt), []).append(d["totalcloudcover"][i])
+
+    if ms_data:
+        times_ms = ms_data.get("dimensions", {}).get("time", {}).get("data", [])
+        cloud_data = ms_data.get("variables", {}).get("cloud.cover", {}).get("data", [])
+        for i, t in enumerate(times_ms):
+            dt = datetime.fromisoformat(t.replace("Z", "+00:00")).astimezone(tz)
+            if not (start <= dt <= end):
+                continue
+            if i < len(cloud_data) and cloud_data[i] is not None:
+                hourly_points.setdefault(_hour_bucket(dt), []).append(cloud_data[i])
+
+    return [
+        {"time": hour.isoformat(), "cloud": round(statistics.mean(vals), 1), "sources": len(vals)}
+        for hour, vals in sorted(hourly_points.items())
+    ]
+
+
+def find_best_window(timeline, clear_threshold):
+    """Find the longest contiguous run of hours below clear_threshold% cloud
+    cover. Each timeline point represents the hour starting at its
+    timestamp, so a run from point i to point j covers [i.time, j.time+1h)."""
+    if not timeline:
+        return None
+    points = [(datetime.fromisoformat(p["time"]), p["cloud"]) for p in timeline]
+    best = None
+    i = 0
+    n = len(points)
+    while i < n:
+        if points[i][1] < clear_threshold:
+            j = i
+            while j < n and points[j][1] < clear_threshold:
+                j += 1
+            run_start = points[i][0]
+            run_end = points[j - 1][0] + timedelta(hours=1)
+            run_clouds = [points[k][1] for k in range(i, j)]
+            run = {
+                "start": run_start.isoformat(),
+                "end": run_end.isoformat(),
+                "hours": round((run_end - run_start).total_seconds() / 3600, 1),
+                "avg_cloud": round(statistics.mean(run_clouds), 1),
+            }
+            if best is None or run["hours"] > best["hours"]:
+                best = run
+            i = j
+        else:
+            i += 1
+    return best
+
+
+def describe_window_trend(best_window, start, end):
+    """A short, plain-language sentence about how conditions change across
+    the night relative to the best clear stretch found."""
+    if not best_window:
+        return "No sustained clear stretch found overnight - expect cloud on and off all night."
+    bw_start = datetime.fromisoformat(best_window["start"])
+    bw_end = datetime.fromisoformat(best_window["end"])
+    starts_at_dusk = bw_start <= start + timedelta(minutes=45)
+    ends_at_dawn = bw_end >= end - timedelta(minutes=45)
+    if starts_at_dusk and ends_at_dawn:
+        return "Conditions look consistently good for the whole night."
+    if starts_at_dusk:
+        return f"Best right after dark, then increasing cloud after {bw_end.strftime('%-I:%M%p').lower()}."
+    if ends_at_dawn:
+        return f"Cloudier earlier on, clearing from around {bw_start.strftime('%-I:%M%p').lower()} onward."
+    return (f"Best window is mid-night, {bw_start.strftime('%-I:%M%p').lower()}"
+            f"\u2013{bw_end.strftime('%-I:%M%p').lower()}, with more cloud before and after.")
+
+
 def build_report(config):
     lat, lon = config["latitude"], config["longitude"]
     tz = ZoneInfo(config["timezone"])
@@ -441,6 +562,7 @@ def build_report(config):
     om_summary = collect_open_meteo_series(om_data, tz, start, end)
 
     yr_summary = None
+    yr_data = None
     try:
         yr_data = fetch_yr(lat, lon, contact_email)
         yr_summary = collect_yr_series(yr_data, tz, start, end)
@@ -459,6 +581,7 @@ def build_report(config):
         sources_status["7Timer! astro"] = f"failed: {e}"
 
     mb_summary = None
+    mb_data = None
     mb_key = get_secret("meteoblue_api_key")
     if mb_key:
         try:
@@ -472,6 +595,7 @@ def build_report(config):
         sources_status["Meteoblue"] = "no API key configured"
 
     ms_summary = None
+    ms_data = None
     ms_key = get_secret("metservice_api_key")
     if ms_key:
         try:
@@ -543,6 +667,14 @@ def build_report(config):
         wind_risk = True
         wind_notes.append(f"Gusts up to {max_gust} km/h")
 
+    # Best clear-sky window - a whole-night average can hide a night that
+    # starts clear and clouds over (or the reverse), so also look at the
+    # hour-by-hour ensemble to find the longest contiguous clear stretch.
+    clear_threshold_pct = config.get("clear_threshold_pct", 30)
+    hourly_timeline = collect_hourly_timeline(om_data, yr_data, mb_data, ms_data, tz, start, end)
+    best_window = find_best_window(hourly_timeline, clear_threshold_pct)
+    best_window_note = describe_window_trend(best_window, start, end)
+
     if ensemble_mean is None:
         verdict = "Unable to determine — not enough data from any source."
     elif ensemble_mean < 20:
@@ -581,6 +713,10 @@ def build_report(config):
         "wind_notes": wind_notes,
         "wind_warn_kmh": wind_warn_kmh,
         "wind_bad_kmh": wind_bad_kmh,
+        "hourly_timeline": hourly_timeline,
+        "best_window": best_window,
+        "best_window_note": best_window_note,
+        "clear_threshold_pct": clear_threshold_pct,
         "verdict": verdict,
         "moon_illumination": round(moon_illum, 1),
         "moon_phase": moon_name,
@@ -598,6 +734,19 @@ def render_text(report, config):
     lines.append("")
     lines.append(f"VERDICT: {report['verdict']}")
     lines.append(f"Ensemble cloud cover: {report['ensemble_cloud_mean']}% (spread across sources: {report['ensemble_cloud_spread']} pts)")
+    bw = report.get("best_window")
+    clear_pct = report.get("clear_threshold_pct", 30)
+    if bw:
+        try:
+            bw_start_disp = datetime.fromisoformat(bw["start"]).strftime("%-I:%M%p").lower()
+            bw_end_disp = datetime.fromisoformat(bw["end"]).strftime("%-I:%M%p").lower()
+        except Exception:
+            bw_start_disp, bw_end_disp = bw["start"], bw["end"]
+        lines.append(f"Best window: {bw_start_disp}-{bw_end_disp} ({bw['hours']}h below {clear_pct}% cloud, avg {bw['avg_cloud']}%)")
+    else:
+        lines.append(f"Best window: no sustained clear stretch found below {clear_pct}% cloud")
+    if report.get("best_window_note"):
+        lines.append(report["best_window_note"])
     if report["rain_risk"]:
         lines.append("RAIN RISK: " + "; ".join(report["rain_notes"]))
     else:
@@ -721,10 +870,10 @@ def _bar_row(label, pct):
     )
 
 
-def _stat_card(label, value, sub="", value_color="#ffffff"):
+def _stat_card(label, value, sub="", value_color="#ffffff", width="50%"):
     sub_html = ('<div style="color:#6c7aa8;font-size:11px;margin-top:2px;">' + _esc(sub) + '</div>') if sub else ""
     return (
-        '<td width="50%" style="padding:6px;" valign="top">'
+        '<td width="' + width + '" style="padding:6px;" valign="top">'
         '<div style="background:#1a2140;border-radius:8px;padding:12px 14px;font-family:-apple-system,Helvetica,Arial,sans-serif;">'
         '<div style="color:#9aa4c7;font-size:11px;letter-spacing:.04em;">' + _esc(label) + '</div>'
         '<div style="color:' + value_color + ';font-size:20px;font-weight:700;margin-top:2px;">' + str(value) + '</div>'
@@ -783,6 +932,33 @@ def render_html(report, config):
     rain_sub = "; ".join(report.get("rain_notes", [])) or "no precipitation flagged"
     rain_card = _stat_card("RAIN RISK", rain_text, rain_sub, value_color=rain_color)
 
+    clear_threshold_pct = report.get("clear_threshold_pct", 30)
+    bw = report.get("best_window")
+    if bw:
+        try:
+            bw_start_disp = datetime.fromisoformat(bw["start"]).strftime("%-I:%M%p").lower()
+            bw_end_disp = datetime.fromisoformat(bw["end"]).strftime("%-I:%M%p").lower()
+        except Exception:
+            bw_start_disp, bw_end_disp = bw["start"], bw["end"]
+        best_window_value = "{}\u2013{}".format(bw_start_disp, bw_end_disp)
+        best_window_sub = "{}h below {}% cloud · {}".format(
+            bw["hours"], clear_threshold_pct, report.get("best_window_note", ""))
+        best_window_color = _cloud_color(bw.get("avg_cloud"))
+    else:
+        best_window_value = "n/a"
+        best_window_sub = report.get("best_window_note") or "no sustained clear stretch found tonight"
+        best_window_color = "#5c6690"
+    best_window_card = _stat_card("BEST WINDOW TONIGHT", best_window_value, best_window_sub,
+                                   value_color=best_window_color, width="100%")
+
+    hour_bars = ""
+    for point in report.get("hourly_timeline", []):
+        try:
+            hour_label = datetime.fromisoformat(point["time"]).strftime("%-I%p").lower()
+        except Exception:
+            hour_label = point["time"]
+        hour_bars += _bar_row(hour_label, point["cloud"])
+
     bars = "".join(
         _bar_row(MODEL_DISPLAY_NAMES.get(m, m), pct)
         for m, pct in report["open_meteo"]["model_cloud_means"].items()
@@ -828,6 +1004,9 @@ def render_html(report, config):
     parts.append('<span style="font-size:22px;vertical-align:middle;">' + verdict_emoji + '</span>')
     parts.append('<span style="font-size:16px;font-weight:700;color:#ffffff;vertical-align:middle;margin-left:8px;">' + verdict_text + '</span>')
     parts.append('</td></tr>')
+    parts.append('<tr><td style="padding:14px 18px 0 18px;">')
+    parts.append('<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>' + best_window_card + '</tr></table>')
+    parts.append('</td></tr>')
     parts.append('<tr><td style="padding:16px 18px 4px 18px;">')
     parts.append('<table role="presentation" width="100%" cellpadding="0" cellspacing="0">')
     parts.append('<tr>' + cloud_card + wind_card + '</tr>')
@@ -837,6 +1016,10 @@ def render_html(report, config):
     parts.append('</table>')
     parts.append('</td></tr>')
     parts.append('<tr><td style="padding:12px 24px 4px 24px;">')
+    parts.append('<div style="color:#9aa4c7;font-size:11px;letter-spacing:.04em;font-family:-apple-system,Helvetica,Arial,sans-serif;margin-bottom:10px;">CLOUD COVER BY HOUR TONIGHT</div>')
+    parts.append(hour_bars if hour_bars else '<div style="color:#5c6690;font-size:12px;font-family:-apple-system,Helvetica,Arial,sans-serif;">Not enough hourly data to break this down.</div>')
+    parts.append('</td></tr>')
+    parts.append('<tr><td style="padding:4px 24px 4px 24px;">')
     parts.append('<div style="color:#9aa4c7;font-size:11px;letter-spacing:.04em;font-family:-apple-system,Helvetica,Arial,sans-serif;margin-bottom:10px;">CLOUD COVER BY SOURCE</div>')
     parts.append(bars)
     parts.append('</td></tr>')
